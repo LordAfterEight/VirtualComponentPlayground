@@ -1,12 +1,22 @@
+#pragma once
+
 #include <stdint.h>
 #include <string>
+#include <SDL3_ttf/SDL_ttf.h>
 
 class Component {
-    std::string name;
-    int16_t pos_x;
-    int16_t pos_y;
-    uint8_t pins_top;
-    uint8_t pins_bottom;
-    uint8_t pins_left;
-    uint8_t pins_right;
+    public:
+        std::string name;
+        float pos_x;
+        float pos_y;
+        uint8_t pins_top = 0;
+        uint8_t pins_bottom = 0;
+        uint8_t pins_left = 0;
+        uint8_t pins_right = 0;
+
+        Component(float x, float y, std::string name) {
+            this->pos_x = x;
+            this->pos_y = y;
+            this->name = name;
+        }
 };
