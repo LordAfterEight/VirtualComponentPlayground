@@ -51,10 +51,15 @@ class Canvas {
         float camera_x = 0.0f;
         float camera_y = 0.0f;
         bool is_panning = false;
+        int dragged_component_index = -1;
+        float drag_offset_x = 0.0f;
+        float drag_offset_y = 0.0f;
         float regular_font_detail_scale = 0.0f;
 
         static constexpr float minimum_detail_scale = 4.0f;
         static constexpr float silkscreen_minimum_screen_height = 12.0f;
+        static constexpr float grid_spacing = 5.0f;
+        static constexpr float minimum_grid_spacing_on_screen = 8.0f;
 
         float get_detail_scale() const {
             return std::max(minimum_detail_scale, std::ceil(this->zoom));
@@ -107,6 +112,126 @@ class Canvas {
 
             TTF_SetFontSize(this->monofont_regular, 24.0f * detail_scale);
             this->regular_font_detail_scale = detail_scale;
+        }
+
+        void get_component_body_size(const Component& component, float& width, float& height) const {
+            uint8_t larger_horizontal = std::max(component.pins_left, component.pins_right);
+            uint8_t larger_vertical = std::max(component.pins_top, component.pins_bottom);
+            width = std::max(20.0f, (static_cast<float>(larger_vertical) + 1.0f) * grid_spacing);
+            height = std::max(20.0f, (static_cast<float>(larger_horizontal) + 1.0f) * grid_spacing);
+        }
+
+        bool point_is_inside_component(const Component& component, float world_x, float world_y) const {
+            float width = 0.0f;
+            float height = 0.0f;
+            this->get_component_body_size(component, width, height);
+            return world_x >= component.pos_x && world_x <= component.pos_x + width &&
+                world_y >= component.pos_y && world_y <= component.pos_y + height;
+        }
+
+        bool component_position_is_valid(int component_index, float candidate_x, float candidate_y) const {
+            const Component& candidate = this->components[component_index];
+            float candidate_width = 0.0f;
+            float candidate_height = 0.0f;
+            this->get_component_body_size(candidate, candidate_width, candidate_height);
+
+            if (candidate_x < 0.0f || candidate_y < 0.0f ||
+                candidate_x + candidate_width > this->canvas_width ||
+                candidate_y + candidate_height > this->canvas_height) {
+                return false;
+            }
+
+            for (int index = 0; index < static_cast<int>(this->components.size()); index++) {
+                if (index == component_index) {
+                    continue;
+                }
+
+                const Component& other = this->components[index];
+                float other_width = 0.0f;
+                float other_height = 0.0f;
+                this->get_component_body_size(other, other_width, other_height);
+                bool bodies_overlap =
+                    candidate_x < other.pos_x + other_width &&
+                    candidate_x + candidate_width > other.pos_x &&
+                    candidate_y < other.pos_y + other_height &&
+                    candidate_y + candidate_height > other.pos_y;
+
+                if (bodies_overlap) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        void begin_component_drag(float mouse_x, float mouse_y) {
+            float world_x = this->camera_x + mouse_x / this->zoom;
+            float world_y = this->camera_y + mouse_y / this->zoom;
+
+            for (int index = static_cast<int>(this->components.size()) - 1; index >= 0; index--) {
+                Component& component = this->components[index];
+                if (this->point_is_inside_component(component, world_x, world_y)) {
+                    this->dragged_component_index = index;
+                    this->drag_offset_x = world_x - component.pos_x;
+                    this->drag_offset_y = world_y - component.pos_y;
+                    return;
+                }
+            }
+        }
+
+        void update_component_drag(float mouse_x, float mouse_y) {
+            if (this->dragged_component_index < 0) {
+                return;
+            }
+
+            float world_x = this->camera_x + mouse_x / this->zoom;
+            float world_y = this->camera_y + mouse_y / this->zoom;
+            float candidate_x = std::round((world_x - this->drag_offset_x) / grid_spacing) * grid_spacing;
+            float candidate_y = std::round((world_y - this->drag_offset_y) / grid_spacing) * grid_spacing;
+
+            if (this->component_position_is_valid(this->dragged_component_index, candidate_x, candidate_y)) {
+                Component& component = this->components[this->dragged_component_index];
+                component.pos_x = candidate_x;
+                component.pos_y = candidate_y;
+            }
+        }
+
+        void render_grid(float detail_scale) {
+            float rendered_grid_spacing = grid_spacing;
+            while (rendered_grid_spacing * this->zoom < minimum_grid_spacing_on_screen) {
+                rendered_grid_spacing *= 2.0f;
+            }
+
+            float visible_left = std::max(0.0f, this->camera_x);
+            float visible_top = std::max(0.0f, this->camera_y);
+            float visible_right = std::min(this->canvas_width, this->camera_x + this->window_width / this->zoom);
+            float visible_bottom = std::min(this->canvas_height, this->camera_y + this->window_height / this->zoom);
+            if (visible_left > visible_right || visible_top > visible_bottom) {
+                return;
+            }
+
+            int first_column = static_cast<int>(std::ceil(visible_left / rendered_grid_spacing));
+            int last_column = static_cast<int>(std::floor(visible_right / rendered_grid_spacing));
+            int first_row = static_cast<int>(std::ceil(visible_top / rendered_grid_spacing));
+            int last_row = static_cast<int>(std::floor(visible_bottom / rendered_grid_spacing));
+
+            std::vector<SDL_FPoint> dots;
+            dots.reserve(static_cast<size_t>(last_column - first_column + 1) *
+                static_cast<size_t>(last_row - first_row + 1));
+
+            for (int column = first_column; column <= last_column; column++) {
+                float x = (static_cast<float>(column) * rendered_grid_spacing - this->camera_x) * detail_scale;
+                for (int row = first_row; row <= last_row; row++) {
+                    float y = (static_cast<float>(row) * rendered_grid_spacing - this->camera_y) * detail_scale;
+                    dots.push_back(SDL_FPoint{x, y});
+                }
+            }
+
+            if (dots.empty()) {
+                return;
+            }
+
+            SDL_SetRenderDrawColor(this->renderer, 62, 72, 94, 255);
+            SDL_RenderPoints(this->renderer, dots.data(), static_cast<int>(dots.size()));
         }
 
         void render_canvas_direction_indicator() {
@@ -165,29 +290,25 @@ class Canvas {
             float pin_thickness = 2.0f * detail_scale;
 
             for (uint8_t pin = 0; pin < component.pins_left; pin++) {
-                float pin_y = y + height * (static_cast<float>(pin) + 1.0f) /
-                    (static_cast<float>(component.pins_left) + 1.0f);
+                float pin_y = y + (static_cast<float>(pin) + 1.0f) * grid_spacing * detail_scale;
                 SDL_FRect pin_rect{x - pin_length, pin_y - pin_thickness * 0.5f, pin_length, pin_thickness};
                 SDL_RenderFillRect(this->renderer, &pin_rect);
             }
 
             for (uint8_t pin = 0; pin < component.pins_right; pin++) {
-                float pin_y = y + height * (static_cast<float>(component.pins_right) - static_cast<float>(pin)) /
-                    (static_cast<float>(component.pins_right) + 1.0f);
+                float pin_y = y + height - (static_cast<float>(pin) + 1.0f) * grid_spacing * detail_scale;
                 SDL_FRect pin_rect{x + width, pin_y - pin_thickness * 0.5f, pin_length, pin_thickness};
                 SDL_RenderFillRect(this->renderer, &pin_rect);
             }
 
             for (uint8_t pin = 0; pin < component.pins_top; pin++) {
-                float pin_x = x + width * (static_cast<float>(component.pins_top) - static_cast<float>(pin)) /
-                    (static_cast<float>(component.pins_top) + 1.0f);
+                float pin_x = x + width - (static_cast<float>(pin) + 1.0f) * grid_spacing * detail_scale;
                 SDL_FRect pin_rect{pin_x - pin_thickness * 0.5f, y - pin_length, pin_thickness, pin_length};
                 SDL_RenderFillRect(this->renderer, &pin_rect);
             }
 
             for (uint8_t pin = 0; pin < component.pins_bottom; pin++) {
-                float pin_x = x + width * (static_cast<float>(pin) + 1.0f) /
-                    (static_cast<float>(component.pins_bottom) + 1.0f);
+                float pin_x = x + (static_cast<float>(pin) + 1.0f) * grid_spacing * detail_scale;
                 SDL_FRect pin_rect{pin_x - pin_thickness * 0.5f, y + height, pin_thickness, pin_length};
                 SDL_RenderFillRect(this->renderer, &pin_rect);
             }
@@ -195,7 +316,7 @@ class Canvas {
 
         void render_pin_one_indicator(float x, float y, float detail_scale) {
             int radius = static_cast<int>(2.0f * detail_scale);
-            float center_offset = 3.5f * detail_scale;
+            float center_offset = 5.0f * detail_scale;
 
             SDL_SetRenderDrawColor(this->renderer, 255, 255, 255, 255);
             for (int offset_y = -radius; offset_y <= radius; offset_y++) {
@@ -207,6 +328,20 @@ class Canvas {
                     }
                 }
             }
+        }
+
+        void render_component_outline(float x, float y, float width, float height, float detail_scale) {
+            float thickness = 2.0f * detail_scale;
+
+            SDL_FRect top{x, y, width, thickness};
+            SDL_FRect bottom{x, y + height - thickness, width, thickness};
+            SDL_FRect left{x, y, thickness, height};
+            SDL_FRect right{x + width - thickness, y, thickness, height};
+
+            SDL_RenderFillRect(this->renderer, &top);
+            SDL_RenderFillRect(this->renderer, &bottom);
+            SDL_RenderFillRect(this->renderer, &left);
+            SDL_RenderFillRect(this->renderer, &right);
         }
 
         bool render_silkscreen(const Component& component, float x, float y, float width, float height, float detail_scale) {
@@ -313,16 +448,17 @@ class Canvas {
                 float x = (component.pos_x - this->camera_x) * detail_scale;
                 float y = (component.pos_y - this->camera_y) * detail_scale;
 
-                uint8_t larger_horizontal = std::max(component.pins_left, component.pins_right);
-                uint8_t larger_vertical = std::max(component.pins_top, component.pins_bottom);
-                float component_width = (20.0f + static_cast<float>(larger_vertical) * 4.0f) * detail_scale;
-                float component_height = (20.0f + static_cast<float>(larger_horizontal) * 4.0f) * detail_scale;
+                float component_width = 0.0f;
+                float component_height = 0.0f;
+                this->get_component_body_size(component, component_width, component_height);
+                component_width *= detail_scale;
+                component_height *= detail_scale;
 
                 SDL_FRect rect = SDL_FRect{x, y, component_width, component_height};
                 SDL_SetRenderDrawColor(this->renderer, 68, 72, 82, 255);
                 SDL_RenderFillRect(this->renderer, &rect);
                 SDL_SetRenderDrawColor(this->renderer, 205, 210, 220, 255);
-                SDL_RenderRect(this->renderer, &rect);
+                this->render_component_outline(x, y, component_width, component_height, detail_scale);
                 this->render_component_pins(component, x, y, component_width, component_height, detail_scale);
                 this->render_pin_one_indicator(x, y, detail_scale);
                 bool silkscreen_is_visible = this->render_silkscreen(component, x, y, component_width, component_height, detail_scale);
@@ -440,13 +576,24 @@ class Canvas {
                         this->event.button.button == SDL_BUTTON_MIDDLE) {
                         this->is_panning = true;
                     }
+                    if (this->event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+                        this->event.button.button == SDL_BUTTON_LEFT) {
+                        this->begin_component_drag(this->event.button.x, this->event.button.y);
+                    }
                     if (this->event.type == SDL_EVENT_MOUSE_BUTTON_UP &&
                         this->event.button.button == SDL_BUTTON_MIDDLE) {
                         this->is_panning = false;
                     }
+                    if (this->event.type == SDL_EVENT_MOUSE_BUTTON_UP &&
+                        this->event.button.button == SDL_BUTTON_LEFT) {
+                        this->dragged_component_index = -1;
+                    }
                     if (this->event.type == SDL_EVENT_MOUSE_MOTION && this->is_panning) {
                         this->camera_x -= this->event.motion.xrel / this->zoom;
                         this->camera_y -= this->event.motion.yrel / this->zoom;
+                    }
+                    if (this->event.type == SDL_EVENT_MOUSE_MOTION) {
+                        this->update_component_drag(this->event.motion.x, this->event.motion.y);
                     }
                 }
                 SDL_GetRenderOutputSize(this->renderer, &this->window_width, &this->window_height);
@@ -465,6 +612,7 @@ class Canvas {
                 };
                 SDL_SetRenderDrawColor(this->renderer, 15, 15, 25, 255);
                 SDL_RenderFillRect(this->renderer, &rect);
+                this->render_grid(detail_scale);
                 this->render_components(detail_scale);
 
                 SDL_SetRenderScale(this->renderer, 1.0f, 1.0f);
