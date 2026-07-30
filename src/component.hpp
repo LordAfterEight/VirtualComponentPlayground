@@ -7,6 +7,7 @@
 class Component {
     public:
         std::string name;
+        std::string silkscreen = "";
         float pos_x;
         float pos_y;
         uint8_t pins_top = 0;

@@ -12,6 +12,8 @@
 #include <format>
 #include <algorithm>
 #include <cmath>
+#include <string>
+#include <unordered_map>
 
 #include "error.hpp"
 #include "component.hpp"
@@ -22,6 +24,12 @@ enum RuntimeEvent {
 
 class Canvas {
     private:
+        struct SilkscreenTexture {
+            SDL_Texture* texture;
+            int width;
+            int height;
+        };
+
         SDL_Color last_color;
         SDL_Color curr_color;
         SDL_Window* window;
@@ -31,6 +39,8 @@ class Canvas {
         TTF_Font* monofont_regular;
         TTF_Font* monofont_bold;
         TTF_TextEngine* textengine;
+        std::unordered_map<int, TTF_Font*> silkscreen_fonts;
+        std::unordered_map<std::string, SilkscreenTexture> silkscreen_textures;
 
         int monitor_width;
         int monitor_height;
@@ -41,6 +51,63 @@ class Canvas {
         float camera_x = 0.0f;
         float camera_y = 0.0f;
         bool is_panning = false;
+        float regular_font_detail_scale = 0.0f;
+
+        static constexpr float minimum_detail_scale = 4.0f;
+        static constexpr float silkscreen_minimum_screen_height = 12.0f;
+
+        float get_detail_scale() const {
+            return std::max(minimum_detail_scale, std::ceil(this->zoom));
+        }
+
+        TTF_Font* get_silkscreen_font(int world_point_size, float detail_scale) {
+            int rendered_point_size = std::max(1, static_cast<int>(std::ceil(world_point_size * detail_scale)));
+            auto existing_font = this->silkscreen_fonts.find(rendered_point_size);
+            if (existing_font != this->silkscreen_fonts.end()) {
+                return existing_font->second;
+            }
+
+            TTF_Font* font = TTF_OpenFont("assets/fonts/IBMPlexMono-Regular.ttf", static_cast<float>(rendered_point_size));
+            if (font) {
+                this->silkscreen_fonts.emplace(rendered_point_size, font);
+            }
+            return font;
+        }
+
+        const SilkscreenTexture* get_silkscreen_texture(TTF_Font* font, int rendered_point_size, const std::string& text) {
+            std::string key = std::to_string(rendered_point_size) + "\n" + text;
+            auto existing_texture = this->silkscreen_textures.find(key);
+            if (existing_texture != this->silkscreen_textures.end()) {
+                return &existing_texture->second;
+            }
+
+            SDL_Surface* surface = TTF_RenderText_Blended(font, text.c_str(), 0, SDL_Color{235, 235, 225, 255});
+            if (!surface) {
+                return nullptr;
+            }
+
+            SilkscreenTexture cached_texture{
+                SDL_CreateTextureFromSurface(this->renderer, surface),
+                surface->w,
+                surface->h
+            };
+            SDL_DestroySurface(surface);
+            if (!cached_texture.texture) {
+                return nullptr;
+            }
+
+            auto inserted_texture = this->silkscreen_textures.emplace(std::move(key), cached_texture).first;
+            return &inserted_texture->second;
+        }
+
+        void set_regular_font_detail_scale(float detail_scale) {
+            if (this->regular_font_detail_scale == detail_scale) {
+                return;
+            }
+
+            TTF_SetFontSize(this->monofont_regular, 24.0f * detail_scale);
+            this->regular_font_detail_scale = detail_scale;
+        }
 
         void render_canvas_direction_indicator() {
             float canvas_left = -this->camera_x * this->zoom;
@@ -93,26 +160,187 @@ class Canvas {
                 arrow_y - unit_y * 10.0f - perpendicular_y * 6.0f);
         }
 
-        void render_components() {
-            this->change_drawing_color(200, 200, 200, 255);
-            for (Component component : this->components) {
-                float x = component.pos_x - this->camera_x;
-                float y = component.pos_y - this->camera_y;
+        void render_component_pins(const Component& component, float x, float y, float width, float height, float detail_scale) {
+            float pin_length = 8.0f * detail_scale;
+            float pin_thickness = 2.0f * detail_scale;
 
-                uint8_t larger_horizontal;
-                uint8_t larger_vertical;
-
-                if (component.pins_left > component.pins_right) larger_horizontal = component.pins_left; else larger_horizontal = component.pins_right;
-                if (component.pins_top > component.pins_bottom) larger_vertical = component.pins_top; else larger_vertical = component.pins_bottom;
-
-                TTF_Text* label = TTF_CreateText(this->textengine, this->monofont_regular, component.name.c_str(), 0);
-                TTF_SetTextColor(label, 255, 200, 230, 200);
-                TTF_DrawRendererText(label, x, y - 10.0f);
-
-                SDL_FRect rect = SDL_FRect{x, y, 20.0f + static_cast<float>(larger_horizontal) * 4.0f, 20.0f + larger_vertical * 4.0f};
-                SDL_RenderRect(this->renderer, &rect);
+            for (uint8_t pin = 0; pin < component.pins_left; pin++) {
+                float pin_y = y + height * (static_cast<float>(pin) + 1.0f) /
+                    (static_cast<float>(component.pins_left) + 1.0f);
+                SDL_FRect pin_rect{x - pin_length, pin_y - pin_thickness * 0.5f, pin_length, pin_thickness};
+                SDL_RenderFillRect(this->renderer, &pin_rect);
             }
-            this->revert_to_last_color();
+
+            for (uint8_t pin = 0; pin < component.pins_right; pin++) {
+                float pin_y = y + height * (static_cast<float>(component.pins_right) - static_cast<float>(pin)) /
+                    (static_cast<float>(component.pins_right) + 1.0f);
+                SDL_FRect pin_rect{x + width, pin_y - pin_thickness * 0.5f, pin_length, pin_thickness};
+                SDL_RenderFillRect(this->renderer, &pin_rect);
+            }
+
+            for (uint8_t pin = 0; pin < component.pins_top; pin++) {
+                float pin_x = x + width * (static_cast<float>(component.pins_top) - static_cast<float>(pin)) /
+                    (static_cast<float>(component.pins_top) + 1.0f);
+                SDL_FRect pin_rect{pin_x - pin_thickness * 0.5f, y - pin_length, pin_thickness, pin_length};
+                SDL_RenderFillRect(this->renderer, &pin_rect);
+            }
+
+            for (uint8_t pin = 0; pin < component.pins_bottom; pin++) {
+                float pin_x = x + width * (static_cast<float>(pin) + 1.0f) /
+                    (static_cast<float>(component.pins_bottom) + 1.0f);
+                SDL_FRect pin_rect{pin_x - pin_thickness * 0.5f, y + height, pin_thickness, pin_length};
+                SDL_RenderFillRect(this->renderer, &pin_rect);
+            }
+        }
+
+        void render_pin_one_indicator(float x, float y, float detail_scale) {
+            int radius = static_cast<int>(2.0f * detail_scale);
+            float center_offset = 3.5f * detail_scale;
+
+            SDL_SetRenderDrawColor(this->renderer, 255, 255, 255, 255);
+            for (int offset_y = -radius; offset_y <= radius; offset_y++) {
+                for (int offset_x = -radius; offset_x <= radius; offset_x++) {
+                    if (offset_x * offset_x + offset_y * offset_y <= radius * radius) {
+                        SDL_RenderPoint(this->renderer,
+                            x + center_offset + static_cast<float>(offset_x),
+                            y + center_offset + static_cast<float>(offset_y));
+                    }
+                }
+            }
+        }
+
+        bool render_silkscreen(const Component& component, float x, float y, float width, float height, float detail_scale) {
+            if (component.silkscreen.empty()) {
+                return false;
+            }
+
+            float padding = 4.0f * detail_scale;
+            float available_width = width - padding * 2.0f;
+            float available_height = height - padding * 2.0f;
+            if (available_width <= 0.0f || available_height <= 0.0f) {
+                return false;
+            }
+
+            bool vertical = height > width;
+            float maximum_font_height = vertical ? available_width : available_height;
+            int largest_point_size = std::max(1, static_cast<int>(std::floor(maximum_font_height / detail_scale)));
+            int smallest_point_size = 1;
+            int chosen_rendered_point_size = 0;
+            TTF_Font* chosen_font = nullptr;
+
+            while (smallest_point_size <= largest_point_size) {
+                int point_size = (smallest_point_size + largest_point_size) / 2;
+                TTF_Font* font = this->get_silkscreen_font(point_size, detail_scale);
+                int text_width = 0;
+                int text_height = 0;
+
+                if (!font || !TTF_GetStringSize(font, component.silkscreen.c_str(), 0, &text_width, &text_height)) {
+                    return false;
+                }
+
+                bool text_fits = vertical
+                    ? text_width <= available_height && text_height <= available_width
+                    : text_width <= available_width && text_height <= available_height;
+
+                if (text_fits) {
+                    chosen_font = font;
+                    chosen_rendered_point_size = static_cast<int>(std::ceil(point_size * detail_scale));
+                    smallest_point_size = point_size + 1;
+                } else {
+                    largest_point_size = point_size - 1;
+                }
+            }
+
+            if (!chosen_font) {
+                return false;
+            }
+
+            const SilkscreenTexture* texture = this->get_silkscreen_texture(
+                chosen_font,
+                chosen_rendered_point_size,
+                component.silkscreen
+            );
+            if (!texture) {
+                return false;
+            }
+
+            if (static_cast<float>(texture->height) * this->zoom / detail_scale < silkscreen_minimum_screen_height) {
+                return false;
+            }
+
+            float text_width = static_cast<float>(texture->width);
+            float text_height = static_cast<float>(texture->height);
+            SDL_FRect text_rect{
+                x + width * 0.5f - text_width * 0.5f,
+                y + height * 0.5f - text_height * 0.5f,
+                text_width,
+                text_height
+            };
+
+            if (vertical) {
+                SDL_RenderTextureRotated(this->renderer, texture->texture, nullptr, &text_rect, 90.0, nullptr, SDL_FLIP_NONE);
+            } else {
+                SDL_RenderTexture(this->renderer, texture->texture, nullptr, &text_rect);
+            }
+            return true;
+        }
+
+        void render_component_label(const Component& component, float x, float y, float width, float detail_scale, bool silkscreen_is_visible) {
+            if (silkscreen_is_visible) {
+                return;
+            }
+
+            TTF_Text* label = TTF_CreateText(this->textengine, this->monofont_regular, component.name.c_str(), 0);
+            if (!label) {
+                return;
+            }
+
+            TTF_SetTextColor(label, 255, 200, 230, 200);
+            int label_width = 0;
+            int label_height = 0;
+            if (TTF_GetTextSize(label, &label_width, &label_height)) {
+                float label_x = x + (width - static_cast<float>(label_width)) * 0.5f;
+                float label_y = y - static_cast<float>(label_height) - 12.0f * detail_scale;
+                TTF_DrawRendererText(label, label_x, label_y);
+            }
+            TTF_DestroyText(label);
+        }
+
+        void render_components(float detail_scale) {
+            this->set_regular_font_detail_scale(detail_scale);
+
+            for (const Component& component : this->components) {
+                float x = (component.pos_x - this->camera_x) * detail_scale;
+                float y = (component.pos_y - this->camera_y) * detail_scale;
+
+                uint8_t larger_horizontal = std::max(component.pins_left, component.pins_right);
+                uint8_t larger_vertical = std::max(component.pins_top, component.pins_bottom);
+                float component_width = (20.0f + static_cast<float>(larger_vertical) * 4.0f) * detail_scale;
+                float component_height = (20.0f + static_cast<float>(larger_horizontal) * 4.0f) * detail_scale;
+
+                SDL_FRect rect = SDL_FRect{x, y, component_width, component_height};
+                SDL_SetRenderDrawColor(this->renderer, 68, 72, 82, 255);
+                SDL_RenderFillRect(this->renderer, &rect);
+                SDL_SetRenderDrawColor(this->renderer, 205, 210, 220, 255);
+                SDL_RenderRect(this->renderer, &rect);
+                this->render_component_pins(component, x, y, component_width, component_height, detail_scale);
+                this->render_pin_one_indicator(x, y, detail_scale);
+                bool silkscreen_is_visible = this->render_silkscreen(component, x, y, component_width, component_height, detail_scale);
+                this->render_component_label(component, x, y, component_width, detail_scale, silkscreen_is_visible);
+            }
+        }
+
+        void render_debug_info() {
+            if (this->show_debug_info) {
+                SDL_SetRenderDrawColor(this->renderer, 255, 255, 255, 100);
+                SDL_RenderDebugText(this->renderer, 10.0, 10.0, std::format("Window  Resolution: {}x{}", this->window_width, this->window_height).c_str());
+                SDL_RenderDebugText(this->renderer, 10.0, 20.0, std::format("Canvas  Resolution: {}x{}", this->canvas_width, this->canvas_height).c_str());
+                SDL_RenderDebugText(this->renderer, 10.0, 30.0, std::format("Monitor Resolution: {}x{}", this->monitor_width, this->monitor_height).c_str());
+                std::string fps_text = std::format("FPS: {:.1f}", this->fps);
+                std::string zoom_text = std::format("Zoom: {:.2f}", this->zoom);
+                SDL_RenderDebugText(this->renderer, this->window_width - strlen(fps_text.c_str()) * 8 - 10, 10.0, fps_text.c_str());
+                SDL_RenderDebugText(this->renderer, this->window_width - strlen(zoom_text.c_str()) * 8 - 10, 20.0, zoom_text.c_str());
+            }
         }
 
     public:
@@ -151,6 +379,17 @@ class Canvas {
         }
 
         ~Canvas() {
+            for (const auto& entry : this->silkscreen_textures) {
+                SDL_DestroyTexture(entry.second.texture);
+            }
+            for (const auto& entry : this->silkscreen_fonts) {
+                TTF_CloseFont(entry.second);
+            }
+            TTF_CloseFont(this->monofont_light);
+            TTF_CloseFont(this->monofont_regular);
+            TTF_CloseFont(this->monofont_bold);
+            TTF_DestroyRendererTextEngine(this->textengine);
+            TTF_Quit();
             SDL_DestroyRenderer(this->renderer);
             SDL_DestroyWindow(this->window);
             SDL_Quit();
@@ -215,26 +454,23 @@ class Canvas {
                 SDL_SetRenderDrawColor(this->renderer, 10, 10, 20, 255);
                 SDL_RenderClear(this->renderer);
 
-                SDL_SetRenderScale(this->renderer, this->zoom, this->zoom);  // === Scaled drawing starts here ===
+                float detail_scale = this->get_detail_scale();
+                SDL_SetRenderScale(this->renderer, this->zoom / detail_scale, this->zoom / detail_scale);
 
-                SDL_FRect rect = SDL_FRect{-this->camera_x, -this->camera_y, this->canvas_width, this->canvas_height};
-                this->change_drawing_color(15, 15, 25, 255);
+                SDL_FRect rect = SDL_FRect{
+                    -this->camera_x * detail_scale,
+                    -this->camera_y * detail_scale,
+                    this->canvas_width * detail_scale,
+                    this->canvas_height * detail_scale
+                };
+                SDL_SetRenderDrawColor(this->renderer, 15, 15, 25, 255);
                 SDL_RenderFillRect(this->renderer, &rect);
-                this->render_components();
+                this->render_components(detail_scale);
 
-                SDL_SetRenderScale(this->renderer, 1.0f, 1.0f);             // === Scaled drawing ends here ===
+                SDL_SetRenderScale(this->renderer, 1.0f, 1.0f);
                 this->render_canvas_direction_indicator();
 
-                if (this->show_debug_info) {
-                    SDL_SetRenderDrawColor(this->renderer, 255, 255, 255, 100);
-                    SDL_RenderDebugText(this->renderer, 10.0, 10.0, std::format("Window  Resolution: {}x{}", this->window_width, this->window_height).c_str());
-                    SDL_RenderDebugText(this->renderer, 10.0, 20.0, std::format("Canvas  Resolution: {}x{}", this->canvas_width, this->canvas_height).c_str());
-                    SDL_RenderDebugText(this->renderer, 10.0, 30.0, std::format("Monitor Resolution: {}x{}", this->monitor_width, this->monitor_height).c_str());
-                    std::string fps_text = std::format("FPS: {:.1f}", this->fps);
-                    std::string zoom_text = std::format("Zoom: {:.2f}", this->zoom);
-                    SDL_RenderDebugText(this->renderer, this->window_width - strlen(fps_text.c_str()) * 8 - 10, 10.0, fps_text.c_str());
-                    SDL_RenderDebugText(this->renderer, this->window_width - strlen(zoom_text.c_str()) * 8 - 10, 20.0, zoom_text.c_str());
-                }
+                this->render_debug_info();
 
                 SDL_RenderPresent(this->renderer);
                 this->frame_count++;
