@@ -13,7 +13,7 @@ else
         filename=$(basename "$file")
         name="${filename%.*}"
         printf "\x1b[38;2;100;255;100mCompiling\x1b[0m %s" "$filename"
-        if error_output=$(g++ -std="$STD" $(pkg-config --cflags sdl3 sdl3-ttf) -c "$file" -o "obj/${name}.o" 2>&1); then
+        if error_output=$(g++ -std="$STD" -Isrc $(pkg-config --cflags sdl3 sdl3-ttf) -c "$file" -o "obj/${name}.o" 2>&1); then
             printf "\x1b[38;2;100;255;100m    OK\x1b[0m\n"
         else
             printf "\x1b[38;2;255;100;100m    ERR\x1b[0m\n"
